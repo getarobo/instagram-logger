@@ -26,6 +26,12 @@ dev = [
     "vcrpy>=6.0",
     "ruff>=0.6",
 ]
+# Web-API client we explored as a fallback when instagrapi's mobile-API
+# path is locked by IG's anti-automation. See SESSION_HANDOFF.md ("Auth
+# blocker, 2026-05-07") and `backend/ig_client/smoke_instaloader.py`.
+web-fallback = [
+    "instaloader>=4.15",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

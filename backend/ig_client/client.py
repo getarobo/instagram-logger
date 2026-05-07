@@ -105,25 +105,89 @@ class IgClient:
         instagram.com → sessionid).
 
         Used when the device is flagged for password-based logins but a
-        browser session is alive. Validates the imported session with a
-        cheap `get_timeline_feed()` auth probe before persisting.
+        browser session is alive. Probes the imported session with a
+        cheap `account_info()` call (less redirect-prone than
+        `get_timeline_feed()`) and persists. Tolerates redirect loops
+        on the probe — that's a known instagrapi quirk when a
+        web-issued sessionid meets the default mobile-API fingerprint;
+        the actual sync path is the real test.
         """
+        import sys
+
         self.cl.login_by_sessionid(sessionid)
-        self.cl.get_timeline_feed()
+        try:
+            self.cl.account_info()
+        except Exception as err:
+            msg = repr(err)
+            if "edirect" not in msg:  # match Redirect / redirect / TooManyRedirects
+                raise
+            print(
+                f"[warn] session probe hit a redirect loop: {msg}",
+                file=sys.stderr,
+            )
+            print(
+                "[warn] Saving settings anyway — `just sync` is the real test.",
+                file=sys.stderr,
+            )
+            print(
+                "[warn] If sync also redirects, set IG_DEVICE_LOCALE / "
+                "IG_DEVICE_COUNTRY / IG_DEVICE_COUNTRY_CODE / "
+                "IG_DEVICE_TIMEZONE_OFFSET in .env to match your phone's "
+                "IG environment.",
+                file=sys.stderr,
+            )
         self.save_settings()
 
     def relogin(self) -> None:
         self.cl.relogin()
 
     # ---- call surface used by ingest ------------------------------------
+    #
+    # Notes on instagrapi shapes (verified against installed version):
+    #   - `cl.collections() -> List[Collection]`             (no kwargs)
+    #   - `cl.collection_pk_by_name(name) -> int`            (lookup)
+    #   - `cl.collection_medias(pk, amount=21, last_media_pk=0) -> List[Media]`
+    #   - `cl.collection_medias_by_name(name) -> List[Media]` (no amount param)
+    # We funnel through `collection_pk_by_name` + `collection_medias` so we
+    # can pass `amount`. `amount=0` means unbounded in instagrapi.
 
-    def collection_medias_by_name(self, name: str, amount: int = 20) -> list[Any]:
-        """Plan §9: first-page-ish fetch from "All Posts"."""
+    def list_collections(self) -> list[Any]:
+        """Return all named collections on the account.
+
+        Used by `reconcile.run_once` to enumerate collections beyond
+        "All Posts" so per-post collection membership can be persisted.
+        """
         retry = with_session_retry(relogin=self.relogin)
 
         @retry
         def _call() -> list[Any]:
-            return list(self.cl.collection_medias_by_name(name, amount=amount))
+            return list(self.cl.collections())
+
+        return _call()
+
+    def list_collection_items(self, name: str, amount: int = 0) -> list[Any]:
+        """Return all medias inside a named collection.
+
+        `amount=0` is unbounded; `reconcile.run_once` relies on full
+        enumeration to gate the unsaved-flag sweep, so we default to 0.
+        """
+        retry = with_session_retry(relogin=self.relogin)
+
+        @retry
+        def _call() -> list[Any]:
+            pk = self.cl.collection_pk_by_name(name)
+            return list(self.cl.collection_medias(pk, amount=amount))
+
+        return _call()
+
+    def collection_medias_by_name(self, name: str, amount: int = 20) -> list[Any]:
+        """Plan §9: first-page-ish fetch from "All Posts" (slice path)."""
+        retry = with_session_retry(relogin=self.relogin)
+
+        @retry
+        def _call() -> list[Any]:
+            pk = self.cl.collection_pk_by_name(name)
+            return list(self.cl.collection_medias(pk, amount=amount))
 
         return _call()
 
