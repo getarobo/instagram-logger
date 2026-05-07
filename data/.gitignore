@@ -1,0 +1,4 @@
+# Keep this directory in git, ignore everything inside it.
+*
+!.gitignore
+!.metadata_never_index

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / Vite
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Project data — keep dirs (see data/.gitignore), ignore contents
+data/app.db
+data/app.db-shm
+data/app.db-wal
+data/instagrapi_settings.json
+data/scheduler.state
+data/media/
+data/thumbnails/
+data/backups/
+data/logs/
+
+# Env
+.env
+.env.local
+
+# OMC runtime state — keep plans/research/handoff, ignore session/runtime.
+# Globbed because OMC tools sometimes drop state into nested cwds (e.g.,
+# frontend/.omc/state/ when an agent runs from frontend/).
+**/.omc/state/
+**/.omc/sessions/
+**/.omc/project-memory.json
+**/.omc/logs/
