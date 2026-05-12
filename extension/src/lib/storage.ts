@@ -23,6 +23,10 @@ export interface ExtensionStorage {
   burst_metrics: BurstMetrics[];
   // Consensus AC#21: bypass warm-up gate for fake-IG smoke testing
   test_mode_skip_warmup: boolean;
+  // E3 Fix 1: persistent queue for Pass-B collection iteration (survives SW eviction)
+  pending_collections: Array<{ slug: string; id: string }>;
+  // E3 Fix 2: Instagram username required to build correct saved-posts URLs
+  ig_username: string;
 }
 
 const DEFAULTS: ExtensionStorage = {
@@ -45,6 +49,8 @@ const DEFAULTS: ExtensionStorage = {
   extension_owned_tabs: {},
   burst_metrics: [],
   test_mode_skip_warmup: false,
+  pending_collections: [],
+  ig_username: '',
 };
 
 export async function getStorage<K extends keyof ExtensionStorage>(

@@ -62,6 +62,25 @@ const styles = {
     cursor: 'pointer',
     fontSize: 12,
   } satisfies React.CSSProperties,
+  buttonDanger: {
+    padding: '4px 10px',
+    border: '1px solid #c00',
+    borderRadius: 4,
+    backgroundColor: '#fff0f0',
+    color: '#c00',
+    cursor: 'pointer',
+    fontSize: 12,
+  } satisfies React.CSSProperties,
+  buttonDisabled: {
+    padding: '4px 10px',
+    border: '1px solid #ccc',
+    borderRadius: 4,
+    backgroundColor: '#f5f5f5',
+    color: '#aaa',
+    cursor: 'not-allowed',
+    fontSize: 12,
+    opacity: 0.6,
+  } satisfies React.CSSProperties,
   statusBox: {
     border: '1px solid #e0e0e0',
     borderRadius: 4,
@@ -90,6 +109,11 @@ const styles = {
     marginTop: 4,
     fontSize: 12,
   } satisfies React.CSSProperties,
+  info: {
+    color: '#0070f3',
+    marginTop: 4,
+    fontSize: 12,
+  } satisfies React.CSSProperties,
   divider: {
     border: 'none',
     borderTop: '1px solid #eee',
@@ -97,12 +121,15 @@ const styles = {
   } satisfies React.CSSProperties,
 };
 
+const ACTIVE_PHASES: Phase[] = ['discovery_all', 'discovery_collections', 'enrichment', 'watch'];
+
 // ---------------------------------------------------------------------------
 // Popup component
 // ---------------------------------------------------------------------------
 
 function Popup() {
   const [secretInput, setSecretInput] = useState('');
+  const [igUsernameInput, setIgUsernameInput] = useState('');
   const [secretSaved, setSecretSaved] = useState(false);
   const [secretError, setSecretError] = useState('');
 
@@ -111,10 +138,12 @@ function Popup() {
   const [stateLoading, setStateLoading] = useState(false);
 
   const [currentPhase, setCurrentPhase] = useState<Phase>('idle');
+  const [discoveryMsg, setDiscoveryMsg] = useState('');
 
-  // Load secret and current phase on mount
+  // Load secret, ig_username, and current phase on mount
   useEffect(() => {
     getSecret().then((s) => setSecretInput(s ?? ''));
+    getStorage(['ig_username']).then(({ ig_username }) => setIgUsernameInput(ig_username ?? ''));
     getStorage(['phase']).then(({ phase }) => setCurrentPhase(phase));
     loadState();
   }, []);
@@ -124,6 +153,7 @@ function Popup() {
     setSecretError('');
     try {
       await setSecret(secretInput.trim());
+      await setStorage({ ig_username: igUsernameInput.trim() });
       setSecretSaved(true);
       setTimeout(() => setSecretSaved(false), 2000);
     } catch (e) {
@@ -145,13 +175,48 @@ function Popup() {
     }
   }, []);
 
+  // Pause / Resume — also sends message to content scripts via background
   const handlePauseResume = async () => {
-    const newPhase: Phase =
-      currentPhase === 'paused'
-        ? stateData?.phase_suggestion ?? 'idle'
-        : 'paused';
-    await setStorage({ phase: newPhase });
-    setCurrentPhase(newPhase);
+    if (currentPhase === 'paused') {
+      // Resume
+      await chrome.runtime.sendMessage({ type: 'resume' });
+      const { phase } = await getStorage(['phase']);
+      setCurrentPhase(phase);
+    } else {
+      // Pause
+      await chrome.runtime.sendMessage({ type: 'pause' });
+      await setStorage({ phase: 'paused' });
+      setCurrentPhase('paused');
+    }
+  };
+
+  // Start Discovery — transitions from idle to discovery_all
+  const handleStartDiscovery = async () => {
+    setDiscoveryMsg('');
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'start_discovery' }) as
+        | { ok: boolean; phase?: string; reason?: string }
+        | undefined;
+      if (reply?.ok) {
+        setCurrentPhase('discovery_all');
+        setDiscoveryMsg('Discovery started.');
+        setTimeout(() => setDiscoveryMsg(''), 3000);
+        // Refresh backend state
+        await loadState();
+      } else {
+        setDiscoveryMsg(`Cannot start: ${reply?.reason ?? 'already active'}`);
+      }
+    } catch (e) {
+      setDiscoveryMsg(`Error: ${String(e)}`);
+    }
+  };
+
+  // Cancel Discovery — stop active discovery and return to idle
+  const handleCancelDiscovery = async () => {
+    await setStorage({ phase: 'idle' });
+    setCurrentPhase('idle');
+    setDiscoveryMsg('Discovery cancelled.');
+    setTimeout(() => setDiscoveryMsg(''), 3000);
   };
 
   const formatDate = (iso: string | null | undefined): string => {
@@ -163,9 +228,30 @@ function Popup() {
     }
   };
 
+  const isActivePhase = ACTIVE_PHASES.includes(currentPhase);
+  const isDiscovering =
+    currentPhase === 'discovery_all' || currentPhase === 'discovery_collections';
+
+  const canStartDiscovery = igUsernameInput.trim().length > 0;
+
   return (
     <div style={styles.container}>
       <h1 style={styles.heading}>instagram-logger</h1>
+
+      {/* Instagram username entry */}
+      <div style={styles.section}>
+        <label style={styles.label}>Instagram username</label>
+        <div style={styles.row}>
+          <input
+            type="text"
+            style={styles.input}
+            value={igUsernameInput}
+            onChange={(e) => setIgUsernameInput(e.target.value)}
+            placeholder="your_ig_username"
+            onKeyDown={(e) => e.key === 'Enter' && handleSaveSecret()}
+          />
+        </div>
+      </div>
 
       {/* Secret entry */}
       <div style={styles.section}>
@@ -233,12 +319,47 @@ function Popup() {
 
       <hr style={styles.divider} />
 
+      {/* Discovery controls */}
+      <div style={styles.section}>
+        <label style={styles.label}>Discovery</label>
+        <div style={styles.row}>
+          {currentPhase === 'idle' ? (
+            <button
+              style={canStartDiscovery ? styles.button : styles.buttonDisabled}
+              onClick={canStartDiscovery ? handleStartDiscovery : undefined}
+              disabled={!canStartDiscovery}
+              title={canStartDiscovery ? undefined : 'Enter your Instagram username above first'}
+            >
+              Start Discovery
+            </button>
+          ) : isDiscovering ? (
+            <button style={styles.buttonDanger} onClick={handleCancelDiscovery}>
+              Cancel Discovery
+            </button>
+          ) : (
+            <button style={styles.buttonDisabled} disabled>
+              {currentPhase === 'paused' ? 'Paused' : `Active: ${currentPhase}`}
+            </button>
+          )}
+          <span style={{ color: '#888', fontSize: 12 }}>local: {currentPhase}</span>
+        </div>
+        {discoveryMsg && <div style={styles.info}>{discoveryMsg}</div>}
+      </div>
+
+      <hr style={styles.divider} />
+
       {/* Pause / Resume */}
       <div style={styles.section}>
         <div style={styles.row}>
-          <button style={styles.button} onClick={handlePauseResume}>
-            {currentPhase === 'paused' ? 'Resume' : 'Pause'}
-          </button>
+          {isActivePhase || currentPhase === 'paused' ? (
+            <button style={styles.button} onClick={handlePauseResume}>
+              {currentPhase === 'paused' ? 'Resume' : 'Pause'}
+            </button>
+          ) : (
+            <button style={styles.buttonDisabled} disabled>
+              {currentPhase === 'idle' ? 'Not running' : 'Pause'}
+            </button>
+          )}
           <span style={{ color: '#888', fontSize: 12 }}>
             local phase: {currentPhase}
           </span>

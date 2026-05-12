@@ -5,4 +5,7 @@ import manifest from './manifest.config';
 
 export default defineConfig({
   plugins: [react(), crx({ manifest })],
+  define: {
+    __EXT_DEV__: JSON.stringify(process.env['EXT_DEV'] === '1'),
+  },
 });
