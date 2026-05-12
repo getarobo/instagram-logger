@@ -332,9 +332,7 @@ def finalize_sync_run(
 
 def latest_sync_run(conn: sqlite3.Connection) -> dict[str, Any] | None:
     """Return the most recent sync_runs row as a dict, or None if no run
-    has been recorded yet. Used by `/api/auth/status` to surface a
-    `SESSION_EXPIRED` state when the latest scheduled run hit
-    LoginRequired/PleaseWaitFewMinutes.
+    has been recorded yet.
     """
     row = conn.execute(
         """

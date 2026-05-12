@@ -61,7 +61,7 @@ def apply_migrations(migrations_dir: Path | None = None) -> list[int]:
             # for being safe to re-run.
             conn.executescript(sql)
             conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) "
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
                 "VALUES (?, datetime('now'))",
                 (version,),
             )

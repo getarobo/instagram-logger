@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from backend.api import collections as collections_router
+from backend.api import ingest_extension as ingest_extension_router
 from backend.api import media as media_router
 from backend.api import posts as posts_router
 from backend.config import settings
@@ -38,3 +39,4 @@ app = FastAPI(title="instagram-logger", lifespan=lifespan)
 app.include_router(posts_router.router, prefix="/api")
 app.include_router(collections_router.router, prefix="/api")
 app.include_router(media_router.router, prefix="/api")
+app.include_router(ingest_extension_router.router, prefix="/api")
