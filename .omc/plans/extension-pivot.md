@@ -135,7 +135,9 @@ extension/
 
 **Repo root:**
 - `justfile` recipes: `ext-dev` (vite watch), `ext-build`, `ext-load` (prints instructions for loading unpacked).
-- `.env.example` gains `INGEST_SECRET=`.
+- `.env.example` gains:
+  - `INGEST_SECRET=change-me-32-byte-hex`
+  - `MAX_MEDIA_GB=50` (consensus R7: storage exhaustion guard threshold)
 
 ---
 
@@ -178,20 +180,28 @@ Phases:
   enrichment              visit /p/<shortcode>/, oldest-first (ORDER BY recency_rank DESC)
   ↓
   watch                   top-peek /saved/all-posts/ every 12-24h jittered
-  ↑       ↓
-  paused  logged_out      manual pause from popup / auth-watch detects login wall
+  ↑       ↓     ↓
+  paused  logged_out  throttling_suspected   manual pause / auth-watch fires / heat-watch fires (consensus R6)
 ```
+
+**Tab-ownership invariants (per consensus Δ4):**
+- Every tab opened by the SW (`chrome.tabs.create`) is immediately registered in `chrome.storage.local.extension_owned_tabs[tabId] = {role, createdAt}`.
+- On SW resume, the SW iterates this map (NEVER `chrome.tabs.query` against `https://www.instagram.com/*` at large). For each entry: `chrome.tabs.get(id)` confirms existence and URL-matches-role; missing or drifted tabs are pruned and recreated.
+- User-opened IG tabs are invisible to the extension — they are never targeted, never read, never modified.
+- This prevents the extension from hijacking a tab the user opened manually for browsing.
 
 Stored state:
 ```ts
 {
-  phase: 'idle' | 'discovery_all' | 'discovery_collections' | 'enrichment' | 'watch' | 'paused' | 'logged_out',
+  phase: 'idle' | 'discovery_all' | 'discovery_collections' | 'enrichment'
+        | 'watch' | 'paused' | 'logged_out' | 'throttling_suspected',
   awake_window_start: '08:00',
   awake_window_end:   '01:00',
   rest_day_iso:       '2026-05-17',  // rotates weekly
   last_burst_at:      ISO,
   next_burst_at:      ISO,
   current_target:     { type: 'saved' | 'collection' | 'post', value: string } | null,
+  extension_owned_tabs: Record<number, { role: 'saved-grid' | 'post-detail' | 'collection', createdAt: ISO }>,
 }
 ```
 
@@ -204,6 +214,10 @@ Stored state:
 - Any phase → `logged_out` if auth-watch fires. Auth recovery is manual (user logs in); next heartbeat detects grid presence and restores previous phase.
 - Any phase → `paused` via popup; resume restores previous phase.
 
+**Phase precedence (when multiple alerts pending)**
+
+When multiple alert conditions are pending simultaneously, the active phase resolves by this precedence (highest wins): `logged_out > storage_low > throttling_suspected > paused > active phases (idle | discovery_all | discovery_collections | enrichment | watch)`. Individual `last_*_at` timestamps in `ingest_meta` are preserved independently for forensic readability. A higher-precedence heartbeat overwrites a lower-precedence one in `ingest_meta.last_phase`; arriving in opposite order, the lower-precedence heartbeat is logged but does not change `last_phase`.
+
 ### 4.3 Scheduler & jitter (`lib/jitter.ts`)
 
 - **Awake window:** active only 08:00 ≤ now < 01:00 next-day, local tz. Outside: all alarms cleared.
@@ -213,6 +227,32 @@ Stored state:
 - **Phase multipliers:** discovery bursts can be longer (cheap per-event); enrichment bursts are shorter with longer gaps (heavier per-event).
 - **All sleeps interruptible** by pause action or `logged_out` signal.
 - **No coexistence detection.** Extension does not yield to human IG activity in other tabs.
+
+**Per-burst metrics capture (consensus R6 / AC#21):**
+At burst close, append a metrics record to `chrome.storage.local.burst_metrics` (rolling 7-burst window, oldest record trimmed on insert):
+
+```ts
+chrome.storage.local.burst_metrics: Array<{
+  burst_id: string,
+  closed_at: ISO,
+  hydration_p50_ms: number,        // median /p/<shortcode>/ DOM-stable time within the burst
+  http_4xx_rate:    number,        // 4xx responses / total media fetches in the burst (0..1)
+  login_redirects:  number,        // count of mid-burst redirects to /accounts/login/
+  posts_seen:       number,
+  media_uploaded:   number,
+}>  // length capped at 7
+```
+
+After each new record is appended, the scheduler evaluates the three R6 triggers against the rolling baseline (mean of the prior 7-burst window, excluding the just-closed burst). If ANY trigger fires:
+- (a) `hydration_p50_ms > 1.5 × baseline.hydration_p50_ms`
+- (b) `http_4xx_rate > 0.05` AND `baseline.http_4xx_rate < 0.02`
+- (c) `login_redirects > 0` (mid-burst, not at session start)
+
+…the SW fires a `state='throttling_suspected'` heartbeat carrying the metrics payload (see §4.7) and self-transitions to the `paused` phase. Resume requires manual ack via the popup.
+
+Trigger evaluation runs only after 4+ bursts have populated the baseline (avoids false positives during warm-up).
+
+**Test-mode bypass:** when `chrome.storage.local.test_mode_skip_warmup === true`, trigger evaluation runs from burst 1 with the burst-0 baseline assumed to be `{hydration_p50_ms: 0, http_4xx_rate: 0, login_redirects: 0}`. Production builds default this flag to `false`; the fake-IG fixture sets it to `true` so AC#21 smoke can fire on a single bad burst without seeding 4 fake good bursts first.
 
 ### 4.4 Discovery (`content/saved-grid.ts`)
 
@@ -314,8 +354,33 @@ pending
 
 - Runs on every IG page (`document_idle`).
 - Detects: redirect to `/accounts/login/`, presence of `<input name="username">` on `/saved/`, "Log in" banner, 401/403 on a saved-grid fetch.
-- On detection: postMessage to background → `POST /api/ingest/extension/heartbeat {state: 'logged_out', at: ISO}` → backend calls `notify.telegram.alert(...)` (stub logs for v1).
+- On detection: postMessage to background → `POST /api/ingest/extension/heartbeat {state: 'logged_out', at: ISO}` → backend calls `notify.telegram.alert(...)` (stub appends JSONL to `.omc/logs/alerts.log` per consensus Δ7).
 - Extension transitions to `logged_out` phase; all alarms paused until next heartbeat detects a valid grid (user logged back in).
+
+**Heartbeat schema (consensus R6 / AC#21 — adds `metrics`):**
+
+```ts
+POST /api/ingest/extension/heartbeat
+body: {
+  state: 'ok' | 'logged_out' | 'throttling_suspected' | 'selectors_broken' | 'extraction_failed' | 'storage_low',
+  phase: PhaseState['phase'],
+  burst?: { id, started_at, closed_at, posts_seen, media_uploaded },
+  metrics?: {                                 // present when state ∈ {throttling_suspected, ok-with-trailing-window}
+    hydration_p50_ms: number,
+    http_4xx_rate:    number,                 // 0..1
+    login_redirects:  number,
+  },
+  last_error?: string,
+}
+```
+
+Note: when extension is in `phase='paused'` via popup pause/resume, heartbeat carries `state: 'ok'` with `phase: 'paused'`. The `state` field captures unhealthy conditions; phase captures the operational mode.
+
+Backend behavior:
+- `state='logged_out'`: write `ingest_meta.last_logged_out_at = now`; call `notify.telegram.alert(...)` severity=`critical`.
+- `state='throttling_suspected'`: write `ingest_meta.last_throttling_at = now` + persist the `metrics` payload to `ingest_meta.last_throttling_metrics_json`; next `/state` response sets `phase='paused'`; call `notify.telegram.alert(...)` severity=`critical`.
+- `state='storage_low'`: write `ingest_meta.last_storage_low_at = now`; next `/state` response sets `phase='paused'`; call `notify.telegram.alert(...)` severity=`critical`.
+- All alert paths are rate-limited to once / 30min via `ingest_meta.last_alert_at` to avoid duplicate JSONL spam.
 
 ### 4.8 Storage (`chrome.storage.local`)
 
@@ -340,7 +405,15 @@ User clicks "Retry" on a tile in the React UI:
 - **Tombstone tile (`lost`):** UI calls `POST /api/posts/:id/retry-page`. Backend sets `state='placeholder'`, `retry_count=0`, `next_retry_at=now`. Backend pushes a one-shot signal in the next `/api/ingest/extension/state` response (field `priority_target: { shortcode, reason: 'manual_retry' }`). Extension prepends this shortcode to its enrichment queue.
 - **Enriched tile with `media_failed` slide:** UI calls `POST /api/posts/:id/retry-media/:slide_idx`. Backend sets `post_media.state='pending'`, `retry_count=0`. Same priority-signal mechanism.
 
-The Retry button shows a brief spinner; the user does not get a synchronous "succeeded/failed" result — the next render cycle of the tile reflects the new state when the extension's burst eventually processes it. (Bursts can be 30–180 min away. The UI conveys "queued" while waiting.)
+The Retry button shows a brief spinner; the user does not get a synchronous "succeeded/failed" result — the next render cycle of the tile reflects the new state when the extension's burst eventually processes it. Per consensus Δ2, when `priority_target` is set the SW schedules an early burst within `uniform(60s, 300s)` (capped at one early-burst per 30min window). The UI conveys "Queued — running in ~Xm" while waiting.
+
+**Logged-out UX (consensus Δ6 / T3):** When the latest `/api/ingest/status` reports `phase === 'logged_out'`:
+- The per-tile Retry button renders with `disabled` attribute.
+- A hover `title` tooltip reads: "Extension is logged out of Instagram. Log in via Chrome to resume retries."
+- The button auto-re-enables within ~30s of the user logging back in (via the existing `['ingest','status']` TanStack Query poll cadence; auth-watch fires a heartbeat with `state='ok'` once it detects a valid grid).
+- No new click handler, no separate state machine — the React component already reads `status.phase` for banner rendering, the button just adds `disabled={status?.phase === 'logged_out'}` to the existing JSX.
+
+The same `disabled` rule applies when `phase === 'throttling_suspected'` or `phase === 'storage_low'` (paused states from R6/R7); the tooltip text adapts to the cause.
 
 ---
 
@@ -422,9 +495,15 @@ POST   /api/posts/:id/retry-media/:slide_idx (loopback-only, not secret-gated)
 
 ### 5.3 Schema additions / changes
 
-**Migration `002_extension_state.sql`:**
+**Migration `002_extension_state.sql`** (wrapped in transaction per consensus Δ1; adds materialized aggregate columns + triggers per consensus Δ3):
 
 ```sql
+-- CHECK applies to future writes only; existing rows accept the DEFAULT,
+-- which is in the allowed set. Verified against SQLite 3.51.0 on dev.
+
+PRAGMA foreign_keys = ON;
+BEGIN;
+
 -- posts: add recency_rank, state machine, retry tracking
 ALTER TABLE posts ADD COLUMN recency_rank INTEGER;
 ALTER TABLE posts ADD COLUMN state TEXT NOT NULL DEFAULT 'placeholder'
@@ -433,6 +512,13 @@ ALTER TABLE posts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE posts ADD COLUMN next_retry_at TEXT;
 ALTER TABLE posts ADD COLUMN last_attempted_at TEXT;
 ALTER TABLE posts ADD COLUMN payload_fetched_at TEXT;
+
+-- consensus Δ3 (option b): materialized aggregate columns for tile rendering.
+-- Maintained by triggers below; replaces correlated subqueries in /api/posts.
+ALTER TABLE posts ADD COLUMN slides_total   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE posts ADD COLUMN slides_present INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE posts ADD COLUMN slides_failed  INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX idx_posts_state         ON posts(state);
 CREATE INDEX idx_posts_recency       ON posts(recency_rank DESC);
 CREATE INDEX idx_posts_next_retry    ON posts(next_retry_at)
@@ -447,29 +533,70 @@ ALTER TABLE post_media ADD COLUMN last_url TEXT;
 ALTER TABLE post_media ADD COLUMN last_attempted_at TEXT;
 CREATE INDEX idx_post_media_state ON post_media(state);
 
+-- consensus Δ3 (option b): triggers maintain posts.slides_{total,present,failed}.
+-- Mirrors the FTS trigger pattern already used in 001_init.sql.
+CREATE TRIGGER post_media_aggr_ins AFTER INSERT ON post_media
+BEGIN
+  UPDATE posts SET
+    slides_total   = slides_total + 1,
+    slides_present = slides_present + (NEW.state = 'present'),
+    slides_failed  = slides_failed  + (NEW.state = 'media_failed')
+  WHERE id = NEW.post_id;
+END;
+
+CREATE TRIGGER post_media_aggr_upd AFTER UPDATE OF state ON post_media
+BEGIN
+  UPDATE posts SET
+    slides_present = slides_present + (NEW.state = 'present')     - (OLD.state = 'present'),
+    slides_failed  = slides_failed  + (NEW.state = 'media_failed') - (OLD.state = 'media_failed')
+  WHERE id = NEW.post_id;
+END;
+
+CREATE TRIGGER post_media_aggr_del AFTER DELETE ON post_media
+BEGIN
+  UPDATE posts SET
+    slides_total   = slides_total   - 1,
+    slides_present = slides_present - (OLD.state = 'present'),
+    slides_failed  = slides_failed  - (OLD.state = 'media_failed')
+  WHERE id = OLD.post_id;
+END;
+
 -- Note: legacy columns posts.is_unsaved, posts.is_source_deleted,
 -- posts.last_seen_in_saved_at, post_collections.last_seen_at remain nullable
 -- but are no longer maintained. Application code never reads or writes them.
 -- A future migration can DROP them once we're sure nothing depends on them.
 
 INSERT INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'));
+
+COMMIT;
 ```
 
-**Migration `003_ingest_meta.sql`:**
+Integration test (per consensus §5.6): apply migration against a copy of `data/app.db`; assert no row loss; assert new columns + triggers exist; assert CHECK enforced on bad INSERT; **assert atomicity** by monkeypatching `cursor.execute` to raise on the third statement and verifying rollback leaves the schema unchanged.
+
+**Migration `003_ingest_meta.sql`** (wrapped in transaction; adds R6/R7 fields per consensus AC#21/AC#22):
 
 ```sql
+PRAGMA foreign_keys = ON;
+BEGIN;
+
 CREATE TABLE ingest_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  last_heartbeat_at  TEXT,
-  last_phase         TEXT,
-  last_logged_out_at TEXT,
-  last_alert_at      TEXT,        -- for telegram rate-limit
-  priority_target_post_id TEXT,   -- one-shot from manual retry
-  priority_target_reason  TEXT
+  last_heartbeat_at         TEXT,
+  last_phase                TEXT,
+  last_logged_out_at        TEXT,
+  last_throttling_at        TEXT,        -- consensus R6: heat detection
+  last_throttling_metrics_json TEXT,     -- consensus R6: snapshot of breaching burst
+  last_storage_low_at       TEXT,        -- consensus R7: storage exhaustion
+  last_alert_at             TEXT,        -- telegram rate-limit (any severity=critical alert)
+  layout_warning_at         TEXT,        -- R5: selector breakage canary
+  priority_target_post_id   TEXT,        -- one-shot from manual retry
+  priority_target_reason    TEXT
 );
 INSERT INTO ingest_meta(id) VALUES (1);
 
 INSERT INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'));
+
+COMMIT;
 ```
 
 ---
@@ -500,22 +627,45 @@ Existing `['posts', ...]`, `['post', id]`, `['collections']` are unchanged.
 
 ---
 
-## 7. Telegram stub
+## 7. Telegram stub + JSONL alert persistence (consensus Δ7 / R8)
 
 `backend/notify/telegram.py`:
 
 ```python
+import json
 import logging
-log = logging.getLogger(__name__)
+from datetime import datetime, timezone
+from pathlib import Path
 
-# TODO(2026-05-12, gated on E8): replace with real Telegram Bot API send.
+log = logging.getLogger(__name__)
+ALERTS_LOG = Path(".omc/logs/alerts.log")
+
+# TODO(2026-05-12, gated on E8): replace the log line below with a real
+# Telegram Bot API send. The JSONL append MUST stay regardless — it is the
+# forensic record between E5 (alerts start firing) and E8 (Telegram is live).
 # Env vars (future): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 # httpx.post(f"https://api.telegram.org/bot{token}/sendMessage", json={...})
 def alert(message: str, *, severity: str = "warning") -> None:
+    ALERTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "severity": severity,
+        "message": message,
+    }
+    with ALERTS_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
     log.warning("[TELEGRAM TODO severity=%s] %s", severity, message)
 ```
 
-Called from `/api/ingest/extension/heartbeat` when `state == 'logged_out'`. Rate-limited to once per 30min via `ingest_meta.last_alert_at`.
+Called from `/api/ingest/extension/heartbeat` when `state ∈ {'logged_out', 'throttling_suspected', 'storage_low', 'selectors_broken', 'extraction_failed'}` with severity=`critical` (or `warning` for layout-only canaries). Rate-limited to once per 30min per severity-bucket via `ingest_meta.last_alert_at`.
+
+**Frontend wiring (consensus Δ7):** `IngestStatusCard` reads the following fields from `/api/ingest/status`:
+- `last_logged_out_at` → red banner: "Log in to Instagram in Chrome to resume."
+- `last_throttling_at` (+ `last_throttling_metrics_json`) → red banner: "Pace adjusted — burst metrics breached baseline at HH:MM."
+- `last_storage_low_at` → red banner: "Media disk at >80% of `MAX_MEDIA_GB`; enrichment paused."
+- `layout_warning_at` → amber banner: "IG layout change detected; manual ack required."
+
+Banners persist regardless of Telegram wiring status (E5 → E8 window is observable without Telegram).
 
 ---
 
@@ -577,6 +727,7 @@ Hard to test against real IG without re-tripping the device fingerprint flag. So
 - `backend/media/from_upload.py`.
 - `backend/notify/telegram.py` stub.
 - Tests: every endpoint, every error path.
+- Migration runner applies migrations in version order: 002 before 003. Heartbeat handler in `ingest_extension.py` MUST guard against `ingest_meta` row absence (defensive read) in case 003 hasn't applied yet during partial-deploy scenarios.
 
 ### E2 — Extension skeleton (1–2 days)
 - `extension/` scaffolding: manifest, @crxjs/vite-plugin build, popup with secret entry.
@@ -617,11 +768,14 @@ Hard to test against real IG without re-tripping the device fingerprint flag. So
 
 - **Media fetch CORS:** confirm at E4 time whether IG CDN URLs are fetchable with `credentials: 'include'` from extension content-script context, or whether we need `mode: 'no-cors'` opaque-blob fallback. Either works; affects only the response-inspection path.
 - **End-of-list detection on /saved/:** confirm IG still uses the "scroll-height-stops-growing" pattern (vs. an explicit "you've reached the end" sentinel). Empirically verify during E3.
-- **Tab management granularity:** plan currently uses three dedicated tabs (saved-grid, collection-grid, post-detail). Confirm at E2 whether one shared tab with URL transitions is less suspicious than three persistent tabs.
-- **Rest-day pattern:** uniform random weekday vs. weighted (more rests on Sun/Mon)? Default uniform; revisit if patterns look bot-like.
-- **Video extraction edge cases:** IG sometimes serves DASH/HLS for longer videos. Spike at E4 to determine: detect manifest URL → ship manifest + segments OR fall back to MediaRecorder OR mark `media_failed` for now. v1 acceptable to skip DASH videos with `media_failed`; user can retry later.
+- **Tab management granularity:** plan currently uses three dedicated tabs (saved-grid, collection-grid, post-detail). Confirm at E2 whether one shared tab with URL transitions is less suspicious than three persistent tabs. Tracked as consensus O3.
+- **Rest-day pattern:** uniform random weekday vs. weighted (more rests on Sun/Mon)? Default uniform; revisit if patterns look bot-like. Tracked as consensus O4.
+- **Video extraction edge cases:** IG sometimes serves DASH/HLS for longer videos. Spike at E4 to determine: detect manifest URL → ship manifest + segments OR fall back to MediaRecorder OR mark `media_failed` for now. v1 acceptable to skip DASH videos with `media_failed`; user can retry later. Tracked as consensus O5.
 - **Account flag from old code paths:** confirm at end of E0 that no remaining code imports from deleted modules (`grep -r ig_client backend/ tests/`).
 - **Re-visit cadence for `lost` 7-day sanity:** is one shot at 7 days enough, or should there be a series (7d, 30d, 90d)? Default one shot.
+- **(Consensus O1) DYI pre-seed for very large backlogs:** v1 chose option (a) "widen timeline to 1–6 weeks" rather than option (b) "add E3.5 DYI pre-seed endpoint". Re-evaluate for v2 if real-world saved-post count is empirically > 7000 OR if user explicitly accepts the engineering cost of a Meta DYI JSON-schema parser + new `POST /api/ingest/dyi-import` endpoint.
+- **(Consensus O2) Single-concurrency token relaxation:** re-evaluate at v1 → v1.1 if throughput at scale proves intolerable AND no heat signals (R6) have fired in 30 days at locked pacing.
+- **(Consensus R6 tuning) Heat-detection thresholds:** initial thresholds (1.5× hydration baseline, >5% 4xx with <2% baseline, mid-burst login redirect) are conservative. Re-tune at end of E7 based on real-IG burst telemetry from the first week of operation.
 
 ---
 
