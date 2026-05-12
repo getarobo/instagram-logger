@@ -16,9 +16,8 @@ import mimetypes
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Tuple
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -51,7 +50,7 @@ def _shard_dir(sha: str) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def fetch_and_store(
@@ -158,7 +157,7 @@ def _file_url_to_path(url: str) -> Path:
     return Path(unquote(parsed.path))
 
 
-def _hash_file(path: Path, chunk_size: int = _DEFAULT_CHUNK) -> Tuple[str, int]:
+def _hash_file(path: Path, chunk_size: int = _DEFAULT_CHUNK) -> tuple[str, int]:
     h = hashlib.sha256()
     size = 0
     with open(path, "rb") as fh:

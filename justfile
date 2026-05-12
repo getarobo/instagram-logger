@@ -27,24 +27,6 @@ install:
 dev:
     .venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 
-# Interactive Instagram login. Writes data/instagrapi_settings.json.
-login:
-    .venv/bin/python -m backend.ig_client.login
-
-# Bypass password login by importing a sessionid cookie from a working
-# browser tab. Use this when `just login` is rejected (BadPassword /
-# device-flagged) but the IG web app loads fine in your browser.
-import-session:
-    .venv/bin/python -m backend.ig_client.import_session
-
-# One-shot ingest of the first page of "All Posts".
-sync:
-    .venv/bin/python -m backend.ingest --first-page-only
-
-# Full B1 sync against the offline fake IG fixture (no auth needed).
-sync-fake:
-    IG_CLIENT=fake .venv/bin/python -m backend.ingest
-
 # Hot-backup the SQLite DB (WAL-safe).
 backup:
     mkdir -p data/backups

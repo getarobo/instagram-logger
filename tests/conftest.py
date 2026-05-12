@@ -22,10 +22,7 @@ def tmp_data_dir(tmp_path: Path) -> Path:
     data.mkdir(parents=True, exist_ok=True)
 
     original_data_dir = settings.data_dir
-    original_ig_client = settings.ig_client
-
     settings.data_dir = data
-    settings.ig_client = "fake"
 
     # Drop any thread-local connection from a previous test so the next
     # `get_connection()` opens against the new path.
@@ -37,4 +34,3 @@ def tmp_data_dir(tmp_path: Path) -> Path:
     finally:
         db_connection.close_thread_connection()
         settings.data_dir = original_data_dir
-        settings.ig_client = original_ig_client

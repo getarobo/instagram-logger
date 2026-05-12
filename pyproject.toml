@@ -13,7 +13,6 @@ license = { text = "Proprietary" }
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "instagrapi>=2.1",
     "httpx>=0.27",
     "pydantic>=2.8",
     "pydantic-settings>=2.5",
@@ -25,12 +24,6 @@ dev = [
     "pytest-asyncio>=0.24",
     "vcrpy>=6.0",
     "ruff>=0.6",
-]
-# Web-API client we explored as a fallback when instagrapi's mobile-API
-# path is locked by IG's anti-automation. See SESSION_HANDOFF.md ("Auth
-# blocker, 2026-05-07") and `backend/ig_client/smoke_instaloader.py`.
-web-fallback = [
-    "instaloader>=4.15",
 ]
 
 [tool.setuptools.packages.find]

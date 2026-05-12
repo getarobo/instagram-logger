@@ -7,17 +7,15 @@ Lifespan startup:
 Routers (slice scope only):
 - /api/posts
 - /api/media/:sha256
-- /api/auth/status
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from backend.api import auth as auth_router
 from backend.api import collections as collections_router
 from backend.api import media as media_router
 from backend.api import posts as posts_router
@@ -40,4 +38,3 @@ app = FastAPI(title="instagram-logger", lifespan=lifespan)
 app.include_router(posts_router.router, prefix="/api")
 app.include_router(collections_router.router, prefix="/api")
 app.include_router(media_router.router, prefix="/api")
-app.include_router(auth_router.router, prefix="/api")
