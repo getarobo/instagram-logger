@@ -670,14 +670,15 @@ def ingest_heartbeat(_: SecretGate, body: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/ingest/extension/resume")
 def ingest_resume(_: SecretGate, body: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Clear storage_low pause so extension can resume (consensus N3 / R7).
+    """Clear alert-phase pause so extension can resume (consensus N3 / R7).
 
-    If last_phase was 'storage_low', resets it to 'enrichment' (or the
-    appropriate active phase). Extension should immediately re-poll /state.
+    If last_phase was one of the alert states (storage_low, logged_out,
+    throttling_suspected), resets it to NULL so /state returns 'idle'.
+    Extension should immediately re-poll /state.
     """
     with tx_immediate() as conn:
         meta = _get_meta(conn)
-        if meta and meta["last_phase"] == "storage_low":
+        if meta and meta["last_phase"] in ("storage_low", "logged_out", "throttling_suspected"):
             conn.execute(
                 "UPDATE ingest_meta SET last_phase = NULL WHERE id = 1"
             )

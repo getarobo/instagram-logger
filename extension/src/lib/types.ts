@@ -80,6 +80,14 @@ export interface BurstMetrics {
   media_uploaded: number;
 }
 
+// Heartbeat metrics payload for alert states (R6 / E5)
+// Subset of BurstMetrics — just the 3 numbers sent in the heartbeat body.
+export interface HeartbeatMetricsPayload {
+  hydration_p50_ms: number;
+  http_4xx_rate: number;
+  login_redirects: number;
+}
+
 // Resume cursor stored in chrome.storage.local (plan §4.8)
 export interface ResumeCursor {
   discovery_all: { last_recency_rank: number | null; scroll_y: number };

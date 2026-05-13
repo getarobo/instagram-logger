@@ -109,6 +109,10 @@ class IngestApi {
     throw new Error(`HEAD /media/exists → ${resp.status}`);
   }
 
+  async postResume(): Promise<{ ok: boolean }> {
+    return this.fetchJson('POST', '/api/ingest/extension/resume', {}) as Promise<{ ok: boolean }>;
+  }
+
   async postMediaFailed(body: {
     post_id: string;
     slide_idx: number;

@@ -10,9 +10,10 @@ import { redactPath } from '../lib/redact';
 // Types
 // ---------------------------------------------------------------------------
 
-type CaptureMode = 'all_posts' | 'collection' | 'collections_index';
+type CaptureMode = 'all_posts' | 'collection' | 'collections_index' | 'watch_peek';
 
 interface StartCapturePayload {
+  mode?: CaptureMode;
   collection_id?: string;
   jitter_config?: {
     scroll_delay_min_ms?: number;
@@ -53,6 +54,9 @@ function detectMode(): CaptureMode | null {
   }
   return null;
 }
+
+// watch_peek: URL matches all-posts but mode override comes from start_capture reply
+// The background sends {type: 'start_capture', mode: 'watch_peek'} to override.
 
 // ---------------------------------------------------------------------------
 // Main
@@ -96,6 +100,8 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Background may override mode (e.g., watch_peek on an all-posts URL)
+  const effectiveMode: CaptureMode = startPayload.mode ?? mode;
   const collectionId: string | undefined = startPayload.collection_id;
   const jitterCfg = startPayload.jitter_config ?? {};
   const scrollDelayMin = jitterCfg.scroll_delay_min_ms ?? 800;
@@ -104,18 +110,24 @@ async function main(): Promise<void> {
   const eolDelayMax = jitterCfg.end_of_list_delay_max_ms ?? 4000;
 
   // Guard: verify mode matches expected
-  if (mode === 'collection' && !collectionId) {
+  if (effectiveMode === 'collection' && !collectionId) {
     console.warn('[instagram-logger] saved-grid: mode=collection but no collection_id provided, exiting');
     return;
   }
 
-  if (mode === 'collections_index') {
+  if (effectiveMode === 'collections_index') {
     await captureCollectionsIndex();
     return;
   }
 
+  if (effectiveMode === 'watch_peek') {
+    // watch_peek: cap at 50 items then immediately signal capture_done (no EOL wait)
+    await captureGrid('all_posts', undefined, scrollDelayMin, scrollDelayMax, eolDelayMin, eolDelayMax, 50);
+    return;
+  }
+
   // modes: all_posts | collection
-  await captureGrid(mode, collectionId, scrollDelayMin, scrollDelayMax, eolDelayMin, eolDelayMax);
+  await captureGrid(effectiveMode as 'all_posts' | 'collection', collectionId, scrollDelayMin, scrollDelayMax, eolDelayMin, eolDelayMax);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +166,7 @@ async function captureGrid(
   scrollDelayMax: number,
   eolDelayMin: number,
   eolDelayMax: number,
+  peekLimit?: number,  // watch_peek: stop after this many shortcodes captured
 ): Promise<void> {
   const seen = new Set<string>();
   let recencyRank = 0;
@@ -220,6 +233,12 @@ async function captureGrid(
     // Flush if batch is large enough
     if (pendingBatch.length >= BATCH_SIZE) {
       await flushBatch();
+    }
+
+    // watch_peek: stop early once we've hit the item cap
+    if (peekLimit !== undefined && seen.size >= peekLimit) {
+      console.log(`[instagram-logger] saved-grid: watch_peek cap reached (${seen.size}/${peekLimit}), stopping`);
+      break;
     }
 
     const currentHeight = document.documentElement.scrollHeight;

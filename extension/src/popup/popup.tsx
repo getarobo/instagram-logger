@@ -122,6 +122,25 @@ const styles = {
 };
 
 const ACTIVE_PHASES: Phase[] = ['discovery_all', 'discovery_collections', 'enrichment', 'watch'];
+const ALERT_PHASES: Phase[] = ['logged_out', 'throttling_suspected', 'storage_low'];
+
+const ALERT_BANNER_CONFIG: Record<string, { bg: string; color: string; text: string }> = {
+  logged_out: {
+    bg: '#c00',
+    color: '#fff',
+    text: 'Instagram session expired — log in via Chrome to resume.',
+  },
+  throttling_suspected: {
+    bg: '#f59e0b',
+    color: '#1a1a1a',
+    text: 'Possible throttling detected — review logs at .omc/logs/alerts.log',
+  },
+  storage_low: {
+    bg: '#ea580c',
+    color: '#fff',
+    text: 'Media disk usage near cap — free space or raise MAX_MEDIA_GB',
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Popup component
@@ -139,6 +158,7 @@ function Popup() {
 
   const [currentPhase, setCurrentPhase] = useState<Phase>('idle');
   const [discoveryMsg, setDiscoveryMsg] = useState('');
+  const [acknowledging, setAcknowledging] = useState(false);
 
   // Load secret, ig_username, and current phase on mount
   useEffect(() => {
@@ -219,6 +239,24 @@ function Popup() {
     setTimeout(() => setDiscoveryMsg(''), 3000);
   };
 
+  const handleAcknowledge = async () => {
+    setAcknowledging(true);
+    try {
+      // POST resume to backend first — clear alert state in ingest_meta
+      await api.postResume();
+      // Only reset local state on success so banner stays visible on failure
+      await setStorage({ phase: 'idle' });
+      setCurrentPhase('idle');
+      // Refresh backend state
+      await loadState();
+    } catch (e) {
+      console.error('[instagram-logger] popup: Acknowledge failed:', e);
+      // Local state untouched — banner stays visible so user sees the failure
+    } finally {
+      setAcknowledging(false);
+    }
+  };
+
   const formatDate = (iso: string | null | undefined): string => {
     if (!iso) return 'never';
     try {
@@ -234,8 +272,47 @@ function Popup() {
 
   const canStartDiscovery = igUsernameInput.trim().length > 0;
 
+  const isAlertPhase = ALERT_PHASES.includes(currentPhase);
+  const alertConfig = isAlertPhase ? ALERT_BANNER_CONFIG[currentPhase] : null;
+
   return (
     <div style={styles.container}>
+      {/* Alert banner — shown for logged_out, throttling_suspected, storage_low */}
+      {alertConfig && (
+        <div
+          style={{
+            backgroundColor: alertConfig.bg,
+            color: alertConfig.color,
+            padding: '8px 10px',
+            borderRadius: 4,
+            marginBottom: 10,
+            fontSize: 12,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <span>{alertConfig.text}</span>
+          <button
+            style={{
+              padding: '2px 8px',
+              border: '1px solid rgba(255,255,255,0.5)',
+              borderRadius: 3,
+              backgroundColor: 'rgba(255,255,255,0.15)',
+              color: alertConfig.color,
+              cursor: acknowledging ? 'not-allowed' : 'pointer',
+              fontSize: 11,
+              whiteSpace: 'nowrap',
+            }}
+            onClick={handleAcknowledge}
+            disabled={acknowledging}
+          >
+            {acknowledging ? '…' : 'Acknowledge'}
+          </button>
+        </div>
+      )}
+
       <h1 style={styles.heading}>instagram-logger</h1>
 
       {/* Instagram username entry */}
