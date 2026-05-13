@@ -47,6 +47,53 @@ class IngestApi {
     return this.fetchJson('POST', '/api/ingest/extension/post', body) as Promise<{ ok: boolean }>;
   }
 
+  /** Alias used by E4 background enrichment flow. */
+  async postPostPayload(body: {
+    shortcode: string;
+    outcome: 'enriched' | 'lost';
+    [key: string]: unknown;
+  }): Promise<{ ok: boolean }> {
+    return this.postPost(body);
+  }
+
+  async postMedia(
+    blob: Blob,
+    sha: string,
+    mime: string,
+    postId: string,
+    slideIdx: number,
+  ): Promise<{ ok: boolean }> {
+    const secret = await getSecret();
+    if (!secret) throw new Error('No ingest secret configured');
+    const fd = new FormData();
+    fd.append('file', blob, `${sha}.bin`);
+    fd.append('sha256', sha);
+    fd.append('mime', mime);
+    fd.append('post_id', postId);
+    fd.append('slide_idx', String(slideIdx));
+    const resp = await fetch(`${BACKEND_BASE}/api/ingest/extension/media`, {
+      method: 'POST',
+      headers: { 'X-Ingest-Secret': secret },
+      body: fd,
+    });
+    if (!resp.ok) throw new Error(`POST /media → ${resp.status}`);
+    return { ok: true };
+  }
+
+  async mediaFailed(
+    postId: string,
+    slideIdx: number,
+    attempts: number,
+    lastError?: string,
+  ): Promise<{ ok: boolean }> {
+    return this.fetchJson('POST', '/api/ingest/extension/media-failed', {
+      post_id: postId,
+      slide_idx: slideIdx,
+      attempts,
+      last_error: lastError,
+    }) as Promise<{ ok: boolean }>;
+  }
+
   async mediaExists(sha: string): Promise<boolean> {
     const secret = await getSecret();
     if (!secret) throw new Error('No ingest secret configured');

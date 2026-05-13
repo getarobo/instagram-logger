@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re as _re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -24,6 +25,31 @@ from backend.media.from_upload import ShaMismatchError, UploadTooLargeError, sto
 from backend.notify import telegram
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Input validation (consensus M2)
+# ---------------------------------------------------------------------------
+
+_SHORTCODE_RE = _re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+_SLUG_RE = _re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+
+
+def _validate_shortcode(value: str, field: str = "shortcode") -> None:
+    """Raise 400 if value contains invalid characters."""
+    if not _SHORTCODE_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid {field}: {value!r} — must match [A-Za-z0-9_-]{{1,128}}",
+        )
+
+
+def _validate_slug(value: str, field: str = "id") -> None:
+    """Raise 400 if slug contains invalid characters."""
+    if not _SLUG_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid {field}: {value!r} — must match [A-Za-z0-9_-]{{1,128}}",
+        )
 
 # ---------------------------------------------------------------------------
 # Secret gate
@@ -104,6 +130,9 @@ def extension_state(_: SecretGate) -> dict[str, Any]:
 def ingest_collections(_: SecretGate, body: list[dict[str, Any]]) -> dict[str, Any]:
     """Upsert a list of collections: [{id, name, is_all_posts}]."""
     now = _now_iso()
+    # M2: validate collection IDs
+    for item in body:
+        _validate_slug(str(item.get("id", "")), field="id")
     with tx_immediate() as conn:
         for item in body:
             conn.execute(
@@ -141,6 +170,12 @@ def ingest_shortcodes(_: SecretGate, body: dict[str, Any]) -> dict[str, Any]:
     collection_id: str | None = body.get("collection_id")
     items: list[dict[str, Any]] = body.get("items", [])
     now = _now_iso()
+
+    # M2: validate shortcodes and optional collection_id
+    for item in items:
+        _validate_shortcode(str(item.get("shortcode", "")))
+    if collection_id is not None:
+        _validate_slug(collection_id, field="collection_id")
 
     with tx_immediate() as conn:
         # Ensure 'unknown' author exists before any post insert (FK constraint).
@@ -210,6 +245,10 @@ def ingest_shortcodes(_: SecretGate, body: dict[str, Any]) -> dict[str, Any]:
 def ingest_membership(_: SecretGate, body: list[dict[str, Any]]) -> dict[str, Any]:
     """Upsert post_collections: [{shortcode, collection_id}]."""
     now = _now_iso()
+    # M2: validate shortcodes and collection_ids
+    for item in body:
+        _validate_shortcode(str(item.get("shortcode", "")))
+        _validate_slug(str(item.get("collection_id", "")), field="collection_id")
     upserted = 0
     with tx_immediate() as conn:
         for item in body:
@@ -247,6 +286,9 @@ def ingest_post(_: SecretGate, body: dict[str, Any]) -> dict[str, Any]:
     shortcode: str = body["shortcode"]
     outcome: str = body["outcome"]
     now = _now_iso()
+
+    # M2: validate shortcode
+    _validate_shortcode(shortcode)
 
     with tx_immediate() as conn:
         existing = conn.execute(
@@ -478,6 +520,8 @@ async def ingest_media(
     slide_idx: Annotated[int, Form()],
 ) -> dict[str, Any]:
     """Multipart blob upload. Re-hashes server-side; rejects sha mismatch."""
+    # M2: validate post_id (shortcode used as post_id for placeholder rows)
+    _validate_shortcode(post_id, field="post_id")
     conn = get_connection()
     try:
         verified_sha = await store_upload(file, sha256, mime, conn=conn)
@@ -513,6 +557,8 @@ def ingest_media_failed(_: SecretGate, body: dict[str, Any]) -> dict[str, Any]:
     post_id: str = body["post_id"]
     slide_idx: int = int(body["slide_idx"])
     attempts: int = int(body.get("attempts", 0))
+    # M2: validate post_id
+    _validate_shortcode(post_id, field="post_id")
 
     with tx_immediate() as conn:
         conn.execute(
@@ -646,6 +692,8 @@ def ingest_resume(_: SecretGate, body: dict[str, Any] | None = None) -> dict[str
 @router.post("/posts/{post_id}/retry-page")
 def retry_page(post_id: str) -> dict[str, Any]:
     """Reset a lost/failed post to placeholder + signal priority to extension."""
+    # M2: validate post_id path parameter
+    _validate_shortcode(post_id, field="post_id")
     now = _now_iso()
     with tx_immediate() as conn:
         result = conn.execute(
@@ -682,6 +730,8 @@ def retry_page(post_id: str) -> dict[str, Any]:
 @router.post("/posts/{post_id}/retry-media/{slide_idx}")
 def retry_media(post_id: str, slide_idx: int) -> dict[str, Any]:
     """Reset a media_failed slide to pending + signal priority to extension."""
+    # M2: validate post_id path parameter
+    _validate_shortcode(post_id, field="post_id")
     with tx_immediate() as conn:
         result = conn.execute(
             """

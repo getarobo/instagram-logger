@@ -4,6 +4,7 @@
 // Consensus Δ4: tab ownership invariants are enforced in background.ts.
 
 import { uniform, sleep } from '../lib/jitter';
+import { redactPath } from '../lib/redact';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,11 +61,11 @@ function detectMode(): CaptureMode | null {
 async function main(): Promise<void> {
   const mode = detectMode();
   if (mode === null) {
-    console.log('[instagram-logger] saved-grid: URL does not match any known mode, exiting', location.pathname);
+    console.log('[instagram-logger] saved-grid: URL does not match any known mode, exiting', redactPath(location.href));
     return;
   }
 
-  console.log('[instagram-logger] saved-grid loaded', mode, location.href);
+  console.log('[instagram-logger] saved-grid loaded', mode, redactPath(location.href));
 
   // Send content_ready and wait for start_capture reply (30s timeout)
   let startPayload: StartCapturePayload | null = null;

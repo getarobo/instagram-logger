@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Post eee555 — fake-IG</title>
+</head>
+<body>
+  <main>
+    <article id="post" role="presentation">
+      <header>
+        <a href="/testuser/">testuser</a>
+        <h2>Test User</h2>
+        <img src="/fake-thumbs/avatar.jpg" alt="testuser's profile picture">
+      </header>
+      <div class="media">
+        <!-- media_url points to a non-existent file to exercise media_failed path -->
+        <img
+          src="/fake-media/missing.jpg"
+          alt="Image with missing media"
+          width="1080"
+          height="1080"
+        >
+      </div>
+      <div class="caption">
+        <h1>Post with a broken media URL — for testing media_failed path</h1>
+      </div>
+      <time datetime="2026-04-01T12:00:00+00:00">April 1, 2026</time>
+    </article>
+  </main>
+</body>
+</html>
