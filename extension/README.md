@@ -19,10 +19,54 @@ pnpm build
 
 ## First-run setup
 
-1. Click the extension icon in the Chrome toolbar
-2. Enter your `INGEST_SECRET` value (from backend `.env` — `INGEST_SECRET=...`)
-3. Click **Save**
-4. Click **Refresh** — backend status should show your archive state
+### 1. Generate an `INGEST_SECRET`
+
+The extension and backend authenticate via a shared secret you create yourself.
+Any random ≥16-char string works. Easy ways to generate one:
+
+```bash
+# macOS / Linux — 32 random bytes, base64-encoded:
+openssl rand -base64 32
+
+# Or via Python:
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Or via Node:
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+Pick one; copy the output to your clipboard.
+
+### 2. Set it in the backend
+
+From the repo root:
+
+```bash
+# If .env doesn't exist yet, copy the template:
+cp .env.example .env
+
+# Open .env in your editor and replace the placeholder
+#   INGEST_SECRET=replace-me-with-a-random-token
+# with your generated token:
+#   INGEST_SECRET=<paste-here>
+```
+
+Then start (or restart) the backend so it picks up the new value:
+
+```bash
+.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+### 3. Paste it into the extension
+
+1. Click the extension icon in the Chrome toolbar.
+2. Enter your **Instagram username** (e.g. `genehan`).
+3. Paste the same `INGEST_SECRET` you generated above.
+4. Click **Save**.
+5. Click **Refresh** — backend status should show your archive state.
+
+The extension stores the secret in `chrome.storage.local`, scoped to its own
+extension ID. It never leaves the loopback network surface.
 
 ## Secret rotation
 
