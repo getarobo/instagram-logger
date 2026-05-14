@@ -33,8 +33,39 @@ export interface Post {
   last_seen_in_saved_at: string;
   is_unsaved: boolean;
   is_source_deleted: boolean;
+  state: "placeholder" | "enriched" | "lost";
+  slides_total: number;
+  slides_present: number;
+  slides_failed: number;
   author: Author;
   slides: Slide[];
+}
+
+export type IngestPhase =
+  | "watch"
+  | "discovery_all"
+  | "discovery_collections"
+  | "enrichment"
+  | "idle"
+  | "logged_out"
+  | "throttling_suspected"
+  | "storage_low"
+  | "paused"
+  | null;
+
+export interface IngestStatus {
+  phase: IngestPhase;
+  last_heartbeat_at: string | null;
+  last_logged_out_at: string | null;
+  last_throttling_at: string | null;
+  last_storage_low_at: string | null;
+  last_alert_at: string | null;
+  total_discovered: number;
+  total_enriched: number;
+  total_lost: number;
+  total_placeholder: number;
+  total_media_present: number;
+  total_media_failed: number;
 }
 
 export interface PostDetail extends Post {
@@ -46,10 +77,30 @@ export interface PostsResponse {
   next_cursor: string | null;
 }
 
-export interface AuthStatus {
-  state: "NEEDS_FIRST_LOGIN" | "CHALLENGE_PENDING" | "LOGGED_IN" | "SESSION_EXPIRED";
-  challenge_kind: "sms" | "email" | "totp" | null;
-  last_error: string | null;
+export async function getIngestStatus(): Promise<IngestStatus> {
+  const res = await fetch("/api/ingest/status");
+  if (!res.ok) throw new Error(`/api/ingest/status ${res.status}`);
+  return res.json();
+}
+
+export async function retryPage(postId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/retry-page`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`retry-page ${res.status}`);
+  return res.json();
+}
+
+export async function retryMedia(
+  postId: string,
+  slideIdx: number
+): Promise<{ ok: boolean }> {
+  const res = await fetch(
+    `/api/posts/${encodeURIComponent(postId)}/retry-media/${slideIdx}`,
+    { method: "POST" }
+  );
+  if (!res.ok) throw new Error(`retry-media ${res.status}`);
+  return res.json();
 }
 
 export async function fetchPosts(collectionId?: string | null): Promise<PostsResponse> {
@@ -58,12 +109,6 @@ export async function fetchPosts(collectionId?: string | null): Promise<PostsRes
     : "/api/posts";
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url} ${res.status}`);
-  return res.json();
-}
-
-export async function fetchAuthStatus(): Promise<AuthStatus> {
-  const res = await fetch("/api/auth/status");
-  if (!res.ok) throw new Error(`/api/auth/status ${res.status}`);
   return res.json();
 }
 
